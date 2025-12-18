@@ -29,8 +29,14 @@ Same as the legacy agent:
 # Set required environment variable
 export RS_HTTP_FACADE_TOKEN="your-secret-token"
 
-# Run the agent (script will create venv and install dependencies)
-./start_sse.sh
+# Run the agent directly
+python3 agent_sse.py
+```
+
+Or use Docker (recommended):
+
+```bash
+docker run -e RS_HTTP_FACADE_TOKEN="your-secret-token" ghcr.io/fred01/embedding-agent:latest
 ```
 
 ### Environment Variables
@@ -57,7 +63,7 @@ python3 agent_sse.py --cpu
 
 # Or via environment variable
 export FORCE_CPU=true
-./start_sse.sh
+python3 agent_sse.py
 ```
 
 ### Docker Compose Setup
@@ -193,6 +199,6 @@ The SSE agent is a drop-in replacement for the legacy polling agent:
 1. Stop the old agent
 2. Ensure rs-http-facade is deployed at `https://nsq.fred.org.ru`
 3. Update environment variable to `RS_HTTP_FACADE_TOKEN`
-4. Run `./start_sse.sh` instead of `./start.sh`
+4. Run the agent with `python3 agent_sse.py` or use Docker
 
 Both agents can run simultaneously during migration.
