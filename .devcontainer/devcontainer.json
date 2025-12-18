@@ -20,9 +20,6 @@
     }
   },
 
-  "runArgs": [
-    "--name=embedding-agent"
-  ],
 
   "containerEnv": {
     "FACADE_URL": "${localEnv:FACADE_URL:http://localhost:8090}",
@@ -30,15 +27,15 @@
     "TASK_STREAM": "${localEnv:TASK_STREAM:embedding_tasks}",
     "TASK_GROUP": "${localEnv:TASK_GROUP:embedding-agent}",
     "RESULT_STREAM": "${localEnv:RESULT_STREAM:embedding_results}",
-    "WEB_PORT": "${localEnv:WEB_PORT:5000}",
+    "WEB_PORT": "${localEnv:WEB_PORT:8080}",
     "FORCE_CPU": "true",
     "PYTHONUNBUFFERED": "1"
   },
 
-  "forwardPorts": [5000],
+  "forwardPorts": [8080],
 
   "portsAttributes": {
-    "5000": {
+    "8080": {
       "label": "Web Dashboard",
       "onAutoForward": "notify"
     }

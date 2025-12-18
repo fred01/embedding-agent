@@ -19,7 +19,7 @@ COPY . /workspace/
 RUN chmod +x /workspace/start_sse.sh /workspace/agent_mock.py
 
 # Expose web dashboard port
-EXPOSE 5000
+EXPOSE 8080
 
 # Set environment variable to force CPU (can be overridden)
 ENV FORCE_CPU=true
