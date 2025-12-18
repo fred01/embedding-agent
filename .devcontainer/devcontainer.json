@@ -1,0 +1,56 @@
+{
+  "name": "Embedding Agent",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.formatting.provider": "black"
+      }
+    }
+  },
+
+  "runArgs": [
+    "--name=embedding-agent",
+    "--network=host"
+  ],
+
+  "containerEnv": {
+    "FACADE_URL": "${localEnv:FACADE_URL:http://localhost:8090}",
+    "FACADE_TOKEN": "${localEnv:FACADE_TOKEN:default-token}",
+    "TASK_STREAM": "${localEnv:TASK_STREAM:embedding_tasks}",
+    "TASK_GROUP": "${localEnv:TASK_GROUP:embedding-agent}",
+    "RESULT_STREAM": "${localEnv:RESULT_STREAM:embedding_results}",
+    "WEB_PORT": "${localEnv:WEB_PORT:5000}",
+    "FORCE_CPU": "true",
+    "PYTHONUNBUFFERED": "1"
+  },
+
+  "forwardPorts": [5000],
+
+  "portsAttributes": {
+    "5000": {
+      "label": "Web Dashboard",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+
+  "mounts": [
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.cache/huggingface,target=/root/.cache/huggingface,type=bind,consistency=cached"
+  ],
+
+  "remoteUser": "root"
+}
