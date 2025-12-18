@@ -1,0 +1,17 @@
+# Core ML dependencies
+torch>=2.0.0
+transformers>=4.30.0
+sentencepiece>=0.1.99
+
+# BGE-M3 embedding model
+FlagEmbedding>=1.2.0
+
+# HTTP client
+requests>=2.31.0
+
+# Web service for statistics dashboard
+Flask>=3.0.0
+
+# Accelerator support (optional, will use what's available)
+# CUDA: installed via torch with CUDA support
+# MPS: built into PyTorch 2.0+ on macOS
