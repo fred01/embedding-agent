@@ -28,22 +28,18 @@ if [ "$(printf '%s\n' "$MIN_VERSION" "$PYTHON_VERSION" | sort -V | head -n1)" !=
 fi
 
 # Check required environment variables
-if [ -z "$FACADE_TOKEN" ]; then
+if [ -z "$RS_HTTP_FACADE_TOKEN" ]; then
     echo -e "${RED}Error: Authentication token is required${NC}"
-    echo "Please set the FACADE_TOKEN environment variable"
+    echo "Please set the RS_HTTP_FACADE_TOKEN environment variable"
     exit 1
 fi
 
-# Optional configuration
-export FACADE_URL=${FACADE_URL:-https://nsq.fred.org.ru}
-export TASK_STREAM=${TASK_STREAM:-embedding_tasks}
-export TASK_GROUP=${TASK_GROUP:-embedding-agent}
-export RESULT_STREAM=${RESULT_STREAM:-embedding_results}
-
-echo "RS Facade URL: $FACADE_URL"
-echo "Task Stream: $TASK_STREAM"
-echo "Task Group: $TASK_GROUP"
-echo "Result Stream: $RESULT_STREAM"
+# Configuration values are now hardcoded in agent_sse.py
+echo "RS Facade URL: https://nsq.fred.org.ru (hardcoded)"
+echo "Task Stream: embedding_tasks (hardcoded)"
+echo "Task Group: embedding-agent (hardcoded)"
+echo "Result Stream: embedding_results (hardcoded)"
+echo "Web Port: 8080 (hardcoded)"
 
 # Create virtual environment if it doesn't exist
 if [ ! -d "venv" ]; then

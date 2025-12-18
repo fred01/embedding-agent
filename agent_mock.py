@@ -308,14 +308,17 @@ class MockEmbeddingAgent:
 
 def main():
     # Read configuration from environment variables
-    facade_url = os.getenv('FACADE_URL', 'http://localhost:8090')
-    token = os.getenv('FACADE_TOKEN', 'default-token')
-    task_topic = os.getenv('TASK_TOPIC', 'embedding_tasks')
-    task_channel = os.getenv('TASK_CHANNEL', 'embedding-agent')
-    result_topic = os.getenv('RESULT_TOPIC', 'embedding_results')
+    # Hardcoded configuration values - these never change
+    facade_url = 'https://nsq.fred.org.ru'
+    task_topic = 'embedding_tasks'
+    task_channel = 'embedding-agent'
+    result_topic = 'embedding_results'
+    
+    # Only configurable parameter
+    token = os.getenv('RS_HTTP_FACADE_TOKEN')
 
     if not token:
-        print("Error: Authentication token is required")
+        print("Error: RS_HTTP_FACADE_TOKEN environment variable is required")
         sys.exit(1)
 
     # Print configuration

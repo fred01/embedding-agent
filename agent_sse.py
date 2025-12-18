@@ -410,21 +410,24 @@ def main():
     args = parser.parse_args()
 
     # Read configuration from environment variables
-    facade_url = os.getenv('FACADE_URL', 'http://localhost:8090')
-    token = os.getenv('FACADE_TOKEN', 'default-token')
-    task_stream = os.getenv('TASK_STREAM', 'embedding_tasks')
-    task_group = os.getenv('TASK_GROUP', 'embedding-agent')
-    result_stream = os.getenv('RESULT_STREAM', 'embedding_results')
+    # Hardcoded configuration values - these never change
+    facade_url = 'https://nsq.fred.org.ru'
+    task_stream = 'embedding_tasks'
+    task_group = 'embedding-agent'
+    result_stream = 'embedding_results'
+    
+    # Only configurable parameter
+    token = os.getenv('RS_HTTP_FACADE_TOKEN')
     
     # Determine device: command-line flag takes precedence, then environment variable
     force_cpu = args.cpu or os.getenv('FORCE_CPU', '').lower() in ('true', '1', 'yes')
     device = 'cpu' if force_cpu else None
 
-    # Web dashboard port
-    web_port = int(os.getenv('WEB_PORT', '5000'))
+    # Web dashboard port - hardcoded
+    web_port = 8080
 
     if not token:
-        print("Error: Authentication token is required")
+        print("Error: RS_HTTP_FACADE_TOKEN environment variable is required")
         sys.exit(1)
 
     # Print configuration
