@@ -21,8 +21,7 @@
   },
 
   "runArgs": [
-    "--name=embedding-agent",
-    "--network=host"
+    "--name=embedding-agent"
   ],
 
   "containerEnv": {
@@ -46,10 +45,6 @@
   },
 
   "workspaceFolder": ".",
-
-  "mounts": [
-    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.cache/huggingface,target=/root/.cache/huggingface,type=bind,consistency=cached"
-  ],
 
   "remoteUser": "root"
 }
