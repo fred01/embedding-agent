@@ -69,7 +69,7 @@ services:
   rs-http-facade:
     image: ghcr.io/fred01/rs-http-facade:latest
     environment:
-      BEARER_TOKEN: ${RS_HTTP_FACADE_TOKEN:-default-token}
+      BEARER_TOKEN: ${RS_HTTP_FACADE_TOKEN}
       PORT: 8090
     ports:
       - "8090:8090"
