@@ -45,8 +45,7 @@
     }
   },
 
-  "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": ".",
 
   "mounts": [
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.cache/huggingface,target=/root/.cache/huggingface,type=bind,consistency=cached"
