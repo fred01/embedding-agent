@@ -41,7 +41,7 @@
     }
   },
 
-  "workspaceFolder": ".",
+  "workspaceFolder": "/workspaces/embedding-agent",
 
   "remoteUser": "root"
 }
