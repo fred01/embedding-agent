@@ -1,23 +1,16 @@
-FROM python:3.11-slim-bullseye
+FROM python:3.11-bullseye
 
 # Set working directory
 WORKDIR /workspace
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt /tmp/requirements.txt
 
 # Install Python dependencies
 # CPU-only PyTorch for smaller image and faster startup
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r /tmp/requirements.txt
 
 # Copy the entire project
 COPY . /workspace/
