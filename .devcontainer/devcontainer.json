@@ -41,6 +41,8 @@
     }
   },
 
+  "runArgs": ["--publish", "8080:8080"],
+
   "workspaceFolder": "/workspaces/work/embedding-agent",
 
   "remoteUser": "root"
