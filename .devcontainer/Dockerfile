@@ -15,9 +15,6 @@ RUN pip install --upgrade pip && \
 # Copy the entire project
 COPY . /workspace/
 
-# Make scripts executable
-RUN chmod +x /workspace/start_sse.sh /workspace/agent_mock.py
-
 # Expose web dashboard port
 EXPOSE 8080
 
