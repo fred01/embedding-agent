@@ -26,21 +26,31 @@ Same as the legacy agent:
 ### Quick Start
 
 ```bash
-# Set required environment variables
-export FACADE_TOKEN="your-secret-token"
-export FACADE_URL="http://localhost:8090"  # optional, default: http://localhost:8090
+# Set required environment variable
+export RS_HTTP_FACADE_TOKEN="your-secret-token"
 
-# Run the agent (script will create venv and install dependencies)
-./start_sse.sh
+# Run the agent directly
+python3 agent_sse.py
+```
+
+Or use Docker (recommended):
+
+```bash
+docker run -e RS_HTTP_FACADE_TOKEN="your-secret-token" ghcr.io/fred01/embedding-agent:latest
 ```
 
 ### Environment Variables
 
-- **`FACADE_TOKEN`** (required) - Authentication token for rs-http-facade
-- **`FACADE_URL`** (optional) - URL of rs-http-facade (default: `http://localhost:8090`)
-- **`TASK_STREAM`** (optional) - Stream for tasks (default: `embedding_tasks`)
-- **`TASK_GROUP`** (optional) - Consumer group for tasks (default: `embedding-agent`)
-- **`RESULT_STREAM`** (optional) - Stream for results (default: `embedding_results`)
+- **`RS_HTTP_FACADE_TOKEN`** (required) - Authentication token for rs-http-facade
+
+**Note**: The following configuration values are now hardcoded in the agent and cannot be changed:
+- **Facade URL**: `https://nsq.fred.org.ru`
+- **Task Stream**: `embedding_tasks`
+- **Task Group**: `embedding-agent`
+- **Result Stream**: `embedding_results`
+- **Web Port**: `8080`
+
+Optional:
 - **`FORCE_CPU`** (optional) - Force CPU usage even if CUDA/MPS is available (default: `false`). Set to `true`, `1`, or `yes` to enable.
 
 ### Command-Line Arguments
@@ -53,7 +63,7 @@ python3 agent_sse.py --cpu
 
 # Or via environment variable
 export FORCE_CPU=true
-./start_sse.sh
+python3 agent_sse.py
 ```
 
 ### Docker Compose Setup
@@ -65,7 +75,7 @@ services:
   rs-http-facade:
     image: ghcr.io/fred01/rs-http-facade:latest
     environment:
-      BEARER_TOKEN: ${FACADE_TOKEN:-default-token}
+      BEARER_TOKEN: ${RS_HTTP_FACADE_TOKEN}
       PORT: 8090
     ports:
       - "8090:8090"
@@ -187,8 +197,8 @@ Check agent health:
 The SSE agent is a drop-in replacement for the legacy polling agent:
 
 1. Stop the old agent
-2. Ensure rs-http-facade is deployed
-3. Update environment variables (FACADE_TOKEN instead of AGENT_TOKEN)
-4. Run `./start_sse.sh` instead of `./start.sh`
+2. Ensure rs-http-facade is deployed at `https://nsq.fred.org.ru`
+3. Update environment variable to `RS_HTTP_FACADE_TOKEN`
+4. Run the agent with `python3 agent_sse.py` or use Docker
 
 Both agents can run simultaneously during migration.
