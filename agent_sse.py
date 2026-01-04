@@ -203,18 +203,20 @@ class EmbeddingAgentSSE:
                 self.stats['last_message_time'] = datetime.now()
 
             if success:
-                # V2: Backend will send FINISH for task message using taskMessageId in result
-                # We no longer send FINISH here - the backend controls the full lifecycle
+                # Send FINISH to allow next message delivery immediately
+                # No need to wait for backend processing - that's asynchronous
+                finish_success = self.finish_message(message_id)
+
                 with self.stats_lock:
                     self.stats['tasks_processed'] += 1
                 total_time = compute_time + publish_time
                 print(f"[{self.agent_id}] ✓ Task {task['chunkUid'][:16]}... completed | "
                       f"Compute={compute_time:.3f}s | Publish={publish_time:.3f}s | Total={total_time:.3f}s")
-                
+
                 # Print stats every 10 tasks
                 if self.stats['tasks_processed'] % 10 == 0:
                     self._print_stats()
-                return True
+                return finish_success
             else:
                 # Failed to publish - will be redelivered after timeout
                 print(f"[{self.agent_id}] Failed to publish result, will be redelivered after timeout")
