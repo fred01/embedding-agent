@@ -59,12 +59,17 @@ class EmbeddingAgentSSE:
             'connection_attempts': 0
         }
         self.stats_lock = threading.Lock()  # Thread-safe access to stats
-        
-        # Load model using shared module
+
+        # Model will be loaded separately (after Flask starts)
+        self.model = None
+        self.device = device
+
+    def load_embedding_model(self):
+        """Load the BGE-M3 model (call this after Flask server is started)"""
         print(f"[{self.agent_id}] Loading BGE-M3 model from shared module...")
-        if device:
-            print(f"[{self.agent_id}] Forcing device: {device}")
-        self.model = load_model(device=device)
+        if self.device:
+            print(f"[{self.agent_id}] Forcing device: {self.device}")
+        self.model = load_model(device=self.device)
         print(f"[{self.agent_id}] Model loaded successfully")
         print(f"[{self.agent_id}] Model: {MODEL_NAME}, Dimension: {EMBEDDING_DIMENSION}")
             
@@ -444,14 +449,18 @@ def main():
     print(f"  Web Dashboard: http://0.0.0.0:{web_port}")
     print("=" * 60)
 
-    # Create agent
+    # Create agent (without loading model yet)
     agent = EmbeddingAgentSSE(facade_url, token, task_stream, task_group, result_stream, device=device)
 
-    # Start Flask web server in a separate daemon thread
+    # Start Flask web server FIRST (available immediately)
     flask_app = create_flask_app(agent)
     flask_thread = threading.Thread(target=run_flask_server, args=(flask_app, web_port), daemon=True)
     flask_thread.start()
     print(f"[{agent.agent_id}] Web dashboard started at http://0.0.0.0:{web_port}")
+    print(f"[{agent.agent_id}] Dashboard is available while model loads...")
+
+    # NOW load the model (this takes 1-2 minutes, but dashboard is already available)
+    agent.load_embedding_model()
 
     # Run agent (blocking)
     agent.run()
