@@ -254,6 +254,20 @@ class EmbeddingAgentSSE:
         print(f"[{self.agent_id}] 📊 Stats (last 10 tasks): "
               f"Compute={compute_avg:.3f}s | Publish={publish_avg:.3f}s | "
               f"Total processed={self.stats['tasks_processed']}")
+    
+    def _process_message_buffer(self, message_buffer: List[Dict[str, Any]], reason: str) -> None:
+        """Process all messages in the buffer and clear it.
+        
+        Args:
+            message_buffer: List of messages to process (will be cleared after processing)
+            reason: Description of why the buffer is being processed (for logging)
+        """
+        if not message_buffer:
+            return
+        print(f"[{self.agent_id}] {reason}, processing {len(message_buffer)} messages")
+        for msg in message_buffer:
+            self.process_message(msg)
+        message_buffer.clear()
               
     def run(self):
         """Main agent loop - consumes messages via SSE with configurable batch size"""
@@ -339,10 +353,7 @@ class EmbeddingAgentSSE:
                                             
                                             # Process batch when buffer is full
                                             if len(message_buffer) >= self.batch_size:
-                                                print(f"[{self.agent_id}] Processing batch of {len(message_buffer)} messages")
-                                                for msg in message_buffer:
-                                                    self.process_message(msg)
-                                                message_buffer = []
+                                                self._process_message_buffer(message_buffer, "Batch full")
                                                 buffer_first_message_time = None
                                         except json.JSONDecodeError as e:
                                             print(f"[{self.agent_id}] Failed to parse SSE message: {e}")
@@ -356,18 +367,12 @@ class EmbeddingAgentSSE:
                                 if message_buffer and buffer_first_message_time is not None:
                                     elapsed = time.time() - buffer_first_message_time
                                     if elapsed >= BUFFER_TIMEOUT_SECONDS:
-                                        print(f"[{self.agent_id}] Buffer timeout ({elapsed:.1f}s), processing {len(message_buffer)} buffered messages")
-                                        for msg in message_buffer:
-                                            self.process_message(msg)
-                                        message_buffer = []
+                                        self._process_message_buffer(message_buffer, f"Buffer timeout ({elapsed:.1f}s)")
                                         buffer_first_message_time = None
 
                         # Process any remaining messages in buffer before connection closes
                         if message_buffer:
-                            print(f"[{self.agent_id}] Processing remaining {len(message_buffer)} messages before reconnect")
-                            for msg in message_buffer:
-                                self.process_message(msg)
-                            message_buffer = []
+                            self._process_message_buffer(message_buffer, "Connection closing")
 
                         # Connection closed
                         with self.stats_lock:
