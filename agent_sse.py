@@ -277,9 +277,8 @@ class EmbeddingAgentSSE:
                     self.stats['connected'] = False
 
                 try:
-                    # Use shorter read timeout for buffer processing
-                    # (connect_timeout, read_timeout) - read timeout enables buffer timeout check
-                    with requests.get(url, headers=headers, stream=True, timeout=(30, BUFFER_TIMEOUT_SECONDS)) as response:
+                    # Timeout 120s - server sends keep-alive comments every 60s
+                    with requests.get(url, headers=headers, stream=True, timeout=120) as response:
                         if response.status_code != 200:
                             print(f"[{self.agent_id}] Failed to connect: HTTP {response.status_code} - {response.text}")
                             time.sleep(5)
@@ -304,61 +303,56 @@ class EmbeddingAgentSSE:
                         # Track when first message was added to buffer (for timeout)
                         buffer_first_message_time = None
 
-                        while True:
-                            try:
-                                # Read with short timeout to allow buffer timeout check
-                                raw_chunk = response.raw.read(4096, decode_content=True)
+                        for raw_chunk in response.iter_content(chunk_size=4096, decode_unicode=False):
+                            if not raw_chunk:
+                                continue
+
+                            # Facade omits charset in Content-Type, so decode raw bytes as UTF-8 explicitly
+                            chunk = raw_chunk.decode('utf-8', errors='replace')
+                            buffer += chunk
+
+                            # Process all complete events in buffer (separated by \n\n)
+                            while '\n\n' in buffer:
+                                # Heartbeat logging every 30 seconds
+                                now = time.time()
+                                if now - last_heartbeat > 30:
+                                    print(f"[{self.agent_id}] Heartbeat: Still connected, processed {message_count} messages so far")
+                                    last_heartbeat = now
+
+                                # Extract one complete event
+                                event, buffer = buffer.split('\n\n', 1)
+                                event = event.strip()
+
+                                if event.startswith('data:'):
+                                    data = event[5:].strip()
+                                    if data:
+                                        try:
+                                            message = json.loads(data)
+                                            message_count += 1
+                                            print(f"[{self.agent_id}] Received message #{message_count}, ID={message.get('id', 'unknown')}")
+                                            # Add message to buffer
+                                            message_buffer.append(message)
+                                            
+                                            # Track when first message was added
+                                            if buffer_first_message_time is None:
+                                                buffer_first_message_time = time.time()
+                                            
+                                            # Process batch when buffer is full
+                                            if len(message_buffer) >= self.batch_size:
+                                                print(f"[{self.agent_id}] Processing batch of {len(message_buffer)} messages")
+                                                for msg in message_buffer:
+                                                    self.process_message(msg)
+                                                message_buffer = []
+                                                buffer_first_message_time = None
+                                        except json.JSONDecodeError as e:
+                                            print(f"[{self.agent_id}] Failed to parse SSE message: {e}")
+                                            print(f"[{self.agent_id}] Data was: {data[:200]}...")
+                                elif event and not event.startswith(':'):
+                                    # Log other non-comment SSE events for debugging
+                                    print(f"[{self.agent_id}] SSE event: {event[:100]}")
                                 
-                                if not raw_chunk:
-                                    # Connection closed by server
-                                    break
-                                    
-                                # Decode raw bytes as UTF-8 explicitly
-                                chunk = raw_chunk.decode('utf-8', errors='replace') if isinstance(raw_chunk, bytes) else raw_chunk
-                                buffer += chunk
-
-                                # Process all complete events in buffer (separated by \n\n)
-                                while '\n\n' in buffer:
-                                    # Heartbeat logging every 30 seconds
-                                    now = time.time()
-                                    if now - last_heartbeat > 30:
-                                        print(f"[{self.agent_id}] Heartbeat: Still connected, processed {message_count} messages so far")
-                                        last_heartbeat = now
-
-                                    # Extract one complete event
-                                    event, buffer = buffer.split('\n\n', 1)
-                                    event = event.strip()
-
-                                    if event.startswith('data:'):
-                                        data = event[5:].strip()
-                                        if data:
-                                            try:
-                                                message = json.loads(data)
-                                                message_count += 1
-                                                print(f"[{self.agent_id}] Received message #{message_count}, ID={message.get('id', 'unknown')}")
-                                                # Add message to buffer
-                                                message_buffer.append(message)
-                                                
-                                                # Track when first message was added
-                                                if buffer_first_message_time is None:
-                                                    buffer_first_message_time = time.time()
-                                                
-                                                # Process batch when buffer is full
-                                                if len(message_buffer) >= self.batch_size:
-                                                    print(f"[{self.agent_id}] Processing batch of {len(message_buffer)} messages")
-                                                    for msg in message_buffer:
-                                                        self.process_message(msg)
-                                                    message_buffer = []
-                                                    buffer_first_message_time = None
-                                            except json.JSONDecodeError as e:
-                                                print(f"[{self.agent_id}] Failed to parse SSE message: {e}")
-                                                print(f"[{self.agent_id}] Data was: {data[:200]}...")
-                                    elif event and not event.startswith(':'):
-                                        # Log other non-comment SSE events for debugging
-                                        print(f"[{self.agent_id}] SSE event: {event[:100]}")
-                                        
-                            except (requests.exceptions.ReadTimeout, TimeoutError):
-                                # Read timeout - check if we should process buffered messages
+                                # Check buffer timeout after processing any event (including keep-alives)
+                                # This triggers when queue becomes empty and server sends keep-alive comments
                                 if message_buffer and buffer_first_message_time is not None:
                                     elapsed = time.time() - buffer_first_message_time
                                     if elapsed >= BUFFER_TIMEOUT_SECONDS:
@@ -367,8 +361,6 @@ class EmbeddingAgentSSE:
                                             self.process_message(msg)
                                         message_buffer = []
                                         buffer_first_message_time = None
-                                # Continue waiting for more messages
-                                continue
 
                         # Process any remaining messages in buffer before connection closes
                         if message_buffer:
@@ -385,7 +377,7 @@ class EmbeddingAgentSSE:
                 except requests.exceptions.Timeout as e:
                     with self.stats_lock:
                         self.stats['connected'] = False
-                    print(f"[{self.agent_id}] Connection timeout during connect")
+                    print(f"[{self.agent_id}] SSE stream timeout (no data received for 120s, expected keep-alive every 60s)")
                     print(f"[{self.agent_id}] Reconnecting...")
                     time.sleep(2)
                 except requests.exceptions.ConnectionError as e:
