@@ -51,6 +51,7 @@ docker run -e RS_HTTP_FACADE_TOKEN="your-secret-token" ghcr.io/fred01/embedding-
 - **Web Port**: `8080`
 
 Optional:
+- **`BATCH_SIZE`** (optional) - Number of messages to retrieve from SSE at once (default: `1`). Higher values reduce connection overhead when processing on GPU. Messages are still processed and finished one by one for stability.
 - **`FORCE_CPU`** (optional) - Force CPU usage even if CUDA/MPS is available (default: `false`). Set to `true`, `1`, or `yes` to enable.
 
 ### Command-Line Arguments
