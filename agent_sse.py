@@ -5,7 +5,9 @@ Embedding Agent for Library Search System - RS HTTP Facade Version
 Consumes text chunks from rs-http-facade via SSE, computes embeddings using BGE-M3,
 and submits results back via HTTP facade.
 
-Uses limit=1 parameter on SSE connect to process one message at a time.
+Uses limit parameter on SSE connect to control batch size (configurable via BATCH_SIZE env var, default 1).
+Messages are buffered, then processed and finished one by one.
+If no new messages arrive within 5 seconds, buffered messages are processed immediately.
 
 IMPORTANT: Uses shared embedding module from common-py to ensure consistency.
 """
@@ -24,13 +26,17 @@ from datetime import datetime
 from flask import Flask, render_template, jsonify
 
 # Import from local embedding module
-from embeddings import load_model, compute_embedding, MODEL_NAME, EMBEDDING_DIMENSION
+from embeddings import load_model, compute_embedding, compute_embeddings_batch, MODEL_NAME, EMBEDDING_DIMENSION
+
+
+# Default timeout for processing buffered messages when queue becomes empty (seconds)
+BUFFER_TIMEOUT_SECONDS = 5
 
 
 class EmbeddingAgentSSE:
-    """Embedding agent that uses SSE to consume from rs-http-facade with limit=1"""
+    """Embedding agent that uses SSE to consume from rs-http-facade with configurable batch size"""
     
-    def __init__(self, facade_url: str, token: str, task_stream: str, task_group: str, result_stream: str, device: Optional[str] = None):
+    def __init__(self, facade_url: str, token: str, task_stream: str, task_group: str, result_stream: str, device: Optional[str] = None, batch_size: int = 1):
         self.facade_url = facade_url.rstrip('/')
         self.token = token
         self.task_stream = task_stream
@@ -63,6 +69,9 @@ class EmbeddingAgentSSE:
         # Model will be loaded separately (after Flask starts)
         self.model = None
         self.device = device
+        
+        # Batch size for SSE limit parameter
+        self.batch_size = batch_size
 
     def load_embedding_model(self):
         """Load the BGE-M3 model (call this after Flask server is started)"""
@@ -245,11 +254,89 @@ class EmbeddingAgentSSE:
         print(f"[{self.agent_id}] 📊 Stats (last 10 tasks): "
               f"Compute={compute_avg:.3f}s | Publish={publish_avg:.3f}s | "
               f"Total processed={self.stats['tasks_processed']}")
+    
+    def _process_message_buffer(self, message_buffer: List[Dict[str, Any]], reason: str) -> None:
+        """Process all messages in the buffer using batch embedding computation.
+        
+        Embeddings are computed in batch for efficiency, but results are published
+        and messages are finished one by one for stability.
+        
+        Args:
+            message_buffer: List of messages to process (will be cleared after processing)
+            reason: Description of why the buffer is being processed (for logging)
+        """
+        if not message_buffer:
+            return
+        
+        print(f"[{self.agent_id}] {reason}, processing {len(message_buffer)} messages")
+        
+        # Extract texts and validate messages
+        texts = []
+        valid_messages = []
+        for msg in message_buffer:
+            task = msg.get('body', {})
+            text = task.get('text')
+            if text:
+                texts.append(text)
+                valid_messages.append(msg)
+            else:
+                print(f"[{self.agent_id}] No text field found in task message {msg.get('id', 'unknown')}, will be redelivered after timeout")
+        
+        if not texts:
+            message_buffer.clear()
+            return
+        
+        # Compute embeddings in batch
+        print(f"[{self.agent_id}] Computing {len(texts)} embeddings in batch...")
+        compute_start = time.time()
+        try:
+            with open(os.devnull, 'w') as devnull, redirect_stderr(devnull), redirect_stdout(devnull):
+                # Use default batch_size=32 for memory efficiency on GPU
+                embeddings = compute_embeddings_batch(self.model, texts)
+            compute_time = time.time() - compute_start
+            # Note: compute_time/len(texts) is amortized per-message time, not actual individual compute time
+            print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
+        except Exception as e:
+            print(f"[{self.agent_id}] Error computing batch embeddings: {e}, messages will be redelivered after timeout")
+            message_buffer.clear()
+            return
+        
+        # Publish and finish each message one by one
+        for i, (msg, embedding) in enumerate(zip(valid_messages, embeddings)):
+            message_id = msg['id']
+            task = msg['body']
+            
+            # Publish result
+            success, publish_time = self.publish_result(message_id, task, embedding)
+            
+            # Update stats (thread-safe)
+            with self.stats_lock:
+                self.stats['compute_times'].append(compute_time / len(texts))  # Amortized compute time
+                self.stats['publish_times'].append(publish_time)
+                self.stats['last_message_time'] = datetime.now()
+            
+            if success:
+                # Send FINISH to allow next message delivery
+                self.finish_message(message_id)
+                
+                with self.stats_lock:
+                    self.stats['tasks_processed'] += 1
+                
+                print(f"[{self.agent_id}] ✓ Task {task['chunkUid'][:16]}... completed ({i+1}/{len(valid_messages)}) | "
+                      f"Publish={publish_time:.3f}s")
+                
+                # Print stats every 10 tasks
+                if self.stats['tasks_processed'] % 10 == 0:
+                    self._print_stats()
+            else:
+                print(f"[{self.agent_id}] Failed to publish result for {task['chunkUid'][:16]}..., will be redelivered after timeout")
+        
+        message_buffer.clear()
               
     def run(self):
-        """Main agent loop - consumes messages via SSE and processes them one at a time"""
-        # Use limit=1 parameter to control in-flight messages (replaces RDY mechanism)
-        url = f"{self.facade_url}/api/events?stream={self.task_stream}&group={self.task_group}&consumer={self.consumer_name}&limit=1"
+        """Main agent loop - consumes messages via SSE with configurable batch size"""
+        # Use limit=batch_size parameter to control in-flight messages
+        url = f"{self.facade_url}/api/events?stream={self.task_stream}&group={self.task_group}&consumer={self.consumer_name}&limit={self.batch_size}"
         headers = {
             'Authorization': f'Bearer {self.token}',
             'Accept': 'text/event-stream'
@@ -257,7 +344,8 @@ class EmbeddingAgentSSE:
         
         print(f"[{self.agent_id}] Agent started, consuming from {self.task_stream}/{self.task_group}")
         print(f"[{self.agent_id}] Consumer name: {self.consumer_name}")
-        print(f"[{self.agent_id}] Using limit=1 (one message at a time)")
+        print(f"[{self.agent_id}] Using limit={self.batch_size} (batch size)")
+        print(f"[{self.agent_id}] Buffer timeout: {BUFFER_TIMEOUT_SECONDS}s")
         
         try:
             while True:
@@ -278,7 +366,7 @@ class EmbeddingAgentSSE:
                         with self.stats_lock:
                             self.stats['connected'] = True
 
-                        print(f"[{self.agent_id}] Connected to SSE stream with limit=1")
+                        print(f"[{self.agent_id}] Connected to SSE stream with limit={self.batch_size}")
 
                         # Add heartbeat logging
                         last_heartbeat = time.time()
@@ -286,6 +374,12 @@ class EmbeddingAgentSSE:
 
                         # Buffer for reading SSE stream properly
                         buffer = ""
+                        
+                        # Message buffer for batch processing
+                        message_buffer = []
+                        
+                        # Track when first message was added to buffer (for timeout)
+                        buffer_first_message_time = None
 
                         for raw_chunk in response.iter_content(chunk_size=4096, decode_unicode=False):
                             if not raw_chunk:
@@ -297,32 +391,52 @@ class EmbeddingAgentSSE:
 
                             # Process all complete events in buffer (separated by \n\n)
                             while '\n\n' in buffer:
-                                    # Heartbeat logging every 30 seconds
-                                    now = time.time()
-                                    if now - last_heartbeat > 30:
-                                        print(f"[{self.agent_id}] Heartbeat: Still connected, processed {message_count} messages so far")
-                                        last_heartbeat = now
+                                # Heartbeat logging every 30 seconds
+                                now = time.time()
+                                if now - last_heartbeat > 30:
+                                    print(f"[{self.agent_id}] Heartbeat: Still connected, processed {message_count} messages so far")
+                                    last_heartbeat = now
 
-                                    # Extract one complete event
-                                    event, buffer = buffer.split('\n\n', 1)
-                                    event = event.strip()
+                                # Extract one complete event
+                                event, buffer = buffer.split('\n\n', 1)
+                                event = event.strip()
 
-                                    if event.startswith('data:'):
-                                        data = event[5:].strip()
-                                        if data:
-                                            try:
-                                                message = json.loads(data)
-                                                message_count += 1
-                                                print(f"[{self.agent_id}] Received message #{message_count}, ID={message.get('id', 'unknown')}")
-                                                # Process message immediately (synchronous, no queue)
-                                                # After finish, server will automatically send next message
-                                                self.process_message(message)
-                                            except json.JSONDecodeError as e:
-                                                print(f"[{self.agent_id}] Failed to parse SSE message: {e}")
-                                                print(f"[{self.agent_id}] Data was: {data[:200]}...")
-                                    elif event and not event.startswith(':'):
-                                        # Log other non-comment SSE events for debugging
-                                        print(f"[{self.agent_id}] SSE event: {event[:100]}")
+                                if event.startswith('data:'):
+                                    data = event[5:].strip()
+                                    if data:
+                                        try:
+                                            message = json.loads(data)
+                                            message_count += 1
+                                            print(f"[{self.agent_id}] Received message #{message_count}, ID={message.get('id', 'unknown')}")
+                                            # Add message to buffer
+                                            message_buffer.append(message)
+                                            
+                                            # Track when first message was added
+                                            if buffer_first_message_time is None:
+                                                buffer_first_message_time = time.time()
+                                            
+                                            # Process batch when buffer is full
+                                            if len(message_buffer) >= self.batch_size:
+                                                self._process_message_buffer(message_buffer, "Batch full")
+                                                buffer_first_message_time = None
+                                        except json.JSONDecodeError as e:
+                                            print(f"[{self.agent_id}] Failed to parse SSE message: {e}")
+                                            print(f"[{self.agent_id}] Data was: {data[:200]}...")
+                                elif event and not event.startswith(':'):
+                                    # Log other non-comment SSE events for debugging
+                                    print(f"[{self.agent_id}] SSE event: {event[:100]}")
+                                
+                                # Check buffer timeout after processing any event (including keep-alives)
+                                # This triggers when queue becomes empty and server sends keep-alive comments
+                                if message_buffer and buffer_first_message_time is not None:
+                                    elapsed = time.time() - buffer_first_message_time
+                                    if elapsed >= BUFFER_TIMEOUT_SECONDS:
+                                        self._process_message_buffer(message_buffer, f"Buffer timeout ({elapsed:.1f}s)")
+                                        buffer_first_message_time = None
+
+                        # Process any remaining messages in buffer before connection closes
+                        if message_buffer:
+                            self._process_message_buffer(message_buffer, "Connection closing")
 
                         # Connection closed
                         with self.stats_lock:
@@ -373,7 +487,8 @@ class EmbeddingAgentSSE:
                 'embedding_dimension': EMBEDDING_DIMENSION,
                 'facade_url': self.facade_url,
                 'task_stream': self.task_stream,
-                'task_group': self.task_group
+                'task_group': self.task_group,
+                'batch_size': self.batch_size
             }
 
 
@@ -423,8 +538,19 @@ def main():
     task_group = 'embedding-agent'
     result_stream = 'embedding_results'
     
-    # Only configurable parameter
+    # Only configurable parameters
     token = os.getenv('RS_HTTP_FACADE_TOKEN')
+    
+    # Batch size for SSE message retrieval (default: 1)
+    batch_size_str = os.getenv('BATCH_SIZE', '1')
+    try:
+        batch_size = int(batch_size_str)
+        if batch_size < 1:
+            print(f"Warning: BATCH_SIZE must be at least 1, got {batch_size}. Using 1.")
+            batch_size = 1
+    except ValueError:
+        print(f"Warning: Invalid BATCH_SIZE value '{batch_size_str}'. Using default 1.")
+        batch_size = 1
     
     # Determine device: command-line flag takes precedence, then environment variable
     force_cpu = args.cpu or os.getenv('FORCE_CPU', '').lower() in ('true', '1', 'yes')
@@ -445,12 +571,13 @@ def main():
     print(f"  Task Group:    {task_group}")
     print(f"  Result Stream: {result_stream}")
     print(f"  Token:         {'*' * 20}{token[-4:] if len(token) > 4 else '****'}")
+    print(f"  Batch Size:    {batch_size}")
     print(f"  Force CPU:     {force_cpu}")
     print(f"  Web Dashboard: http://0.0.0.0:{web_port}")
     print("=" * 60)
 
     # Create agent (without loading model yet)
-    agent = EmbeddingAgentSSE(facade_url, token, task_stream, task_group, result_stream, device=device)
+    agent = EmbeddingAgentSSE(facade_url, token, task_stream, task_group, result_stream, device=device, batch_size=batch_size)
 
     # Start Flask web server FIRST (available immediately)
     flask_app = create_flask_app(agent)
