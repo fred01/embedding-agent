@@ -289,10 +289,15 @@ class EmbeddingAgentSSE:
         # Compute embeddings in batch
         print(f"[{self.agent_id}] Computing {len(texts)} embeddings in batch...")
         compute_start = time.time()
-        with open(os.devnull, 'w') as devnull, redirect_stderr(devnull), redirect_stdout(devnull):
-            embeddings = compute_embeddings_batch(self.model, texts, batch_size=len(texts))
-        compute_time = time.time() - compute_start
-        print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
+        try:
+            with open(os.devnull, 'w') as devnull, redirect_stderr(devnull), redirect_stdout(devnull):
+                embeddings = compute_embeddings_batch(self.model, texts, batch_size=len(texts))
+            compute_time = time.time() - compute_start
+            print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
+        except Exception as e:
+            print(f"[{self.agent_id}] Error computing batch embeddings: {e}, messages will be redelivered after timeout")
+            message_buffer.clear()
+            return
         
         # Publish and finish each message one by one
         for i, (msg, embedding) in enumerate(zip(valid_messages, embeddings)):
@@ -310,7 +315,7 @@ class EmbeddingAgentSSE:
             
             if success:
                 # Send FINISH to allow next message delivery
-                finish_success = self.finish_message(message_id)
+                self.finish_message(message_id)
                 
                 with self.stats_lock:
                     self.stats['tasks_processed'] += 1
