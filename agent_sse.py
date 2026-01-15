@@ -291,8 +291,10 @@ class EmbeddingAgentSSE:
         compute_start = time.time()
         try:
             with open(os.devnull, 'w') as devnull, redirect_stderr(devnull), redirect_stdout(devnull):
-                embeddings = compute_embeddings_batch(self.model, texts, batch_size=len(texts))
+                # Use default batch_size=32 for memory efficiency on GPU
+                embeddings = compute_embeddings_batch(self.model, texts)
             compute_time = time.time() - compute_start
+            # Note: compute_time/len(texts) is amortized per-message time, not actual individual compute time
             print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
         except Exception as e:
             print(f"[{self.agent_id}] Error computing batch embeddings: {e}, messages will be redelivered after timeout")
