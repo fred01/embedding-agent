@@ -26,7 +26,7 @@ from datetime import datetime
 from flask import Flask, render_template, jsonify
 
 # Import from local embedding module
-from embeddings import load_model, compute_embedding, MODEL_NAME, EMBEDDING_DIMENSION
+from embeddings import load_model, compute_embedding, compute_embeddings_batch, MODEL_NAME, EMBEDDING_DIMENSION
 
 
 # Default timeout for processing buffered messages when queue becomes empty (seconds)
@@ -256,7 +256,10 @@ class EmbeddingAgentSSE:
               f"Total processed={self.stats['tasks_processed']}")
     
     def _process_message_buffer(self, message_buffer: List[Dict[str, Any]], reason: str) -> None:
-        """Process all messages in the buffer and clear it.
+        """Process all messages in the buffer using batch embedding computation.
+        
+        Embeddings are computed in batch for efficiency, but results are published
+        and messages are finished one by one for stability.
         
         Args:
             message_buffer: List of messages to process (will be cleared after processing)
@@ -264,9 +267,63 @@ class EmbeddingAgentSSE:
         """
         if not message_buffer:
             return
+        
         print(f"[{self.agent_id}] {reason}, processing {len(message_buffer)} messages")
+        
+        # Extract texts and validate messages
+        texts = []
+        valid_messages = []
         for msg in message_buffer:
-            self.process_message(msg)
+            task = msg.get('body', {})
+            text = task.get('text')
+            if text:
+                texts.append(text)
+                valid_messages.append(msg)
+            else:
+                print(f"[{self.agent_id}] No text field found in task message {msg.get('id', 'unknown')}, will be redelivered after timeout")
+        
+        if not texts:
+            message_buffer.clear()
+            return
+        
+        # Compute embeddings in batch
+        print(f"[{self.agent_id}] Computing {len(texts)} embeddings in batch...")
+        compute_start = time.time()
+        with open(os.devnull, 'w') as devnull, redirect_stderr(devnull), redirect_stdout(devnull):
+            embeddings = compute_embeddings_batch(self.model, texts, batch_size=len(texts))
+        compute_time = time.time() - compute_start
+        print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
+        
+        # Publish and finish each message one by one
+        for i, (msg, embedding) in enumerate(zip(valid_messages, embeddings)):
+            message_id = msg['id']
+            task = msg['body']
+            
+            # Publish result
+            success, publish_time = self.publish_result(message_id, task, embedding)
+            
+            # Update stats (thread-safe)
+            with self.stats_lock:
+                self.stats['compute_times'].append(compute_time / len(texts))  # Amortized compute time
+                self.stats['publish_times'].append(publish_time)
+                self.stats['last_message_time'] = datetime.now()
+            
+            if success:
+                # Send FINISH to allow next message delivery
+                finish_success = self.finish_message(message_id)
+                
+                with self.stats_lock:
+                    self.stats['tasks_processed'] += 1
+                
+                print(f"[{self.agent_id}] ✓ Task {task['chunkUid'][:16]}... completed ({i+1}/{len(valid_messages)}) | "
+                      f"Publish={publish_time:.3f}s")
+                
+                # Print stats every 10 tasks
+                if self.stats['tasks_processed'] % 10 == 0:
+                    self._print_stats()
+            else:
+                print(f"[{self.agent_id}] Failed to publish result for {task['chunkUid'][:16]}..., will be redelivered after timeout")
+        
         message_buffer.clear()
               
     def run(self):
