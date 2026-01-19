@@ -13,6 +13,7 @@ IMPORTANT: Uses shared embedding module from common-py to ensure consistency.
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -130,6 +131,16 @@ class EmbeddingAgentSSE:
                         time.sleep(backoff)
                         backoff *= 2
                         continue
+                    return (False, publish_time)
+            except requests.exceptions.Timeout as e:
+                publish_time = time.time() - publish_start if 'publish_start' in locals() else 0
+                if attempt < max_retries - 1:
+                    print(f"[{self.agent_id}] Timeout publishing result, retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
+                    print(f"[{self.agent_id}] Timeout after {max_retries} attempts: {e}")
                     return (False, publish_time)
             except requests.exceptions.ConnectionError as e:
                 publish_time = time.time() - publish_start if 'publish_start' in locals() else 0
@@ -509,12 +520,23 @@ def create_flask_app(agent: EmbeddingAgentSSE) -> Flask:
     return app
 
 
+class TLSHandshakeErrorFilter(logging.Filter):
+    """Filter to suppress TLS handshake errors from HTTPS clients connecting to HTTP port"""
+    def filter(self, record):
+        # Suppress "Bad request version" errors caused by TLS handshake attempts
+        # These occur when scanners or clients try to connect via HTTPS to HTTP port
+        if hasattr(record, 'msg') and 'Bad request version' in str(record.msg):
+            return False
+        return True
+
+
 def run_flask_server(app: Flask, port: int):
     """Run Flask server (to be run in a separate thread)"""
-    # Disable Flask's startup messages
     import logging
     log = logging.getLogger('werkzeug')
+    # Disable Flask's startup messages and suppress TLS handshake errors
     log.setLevel(logging.ERROR)
+    log.addFilter(TLSHandshakeErrorFilter())
 
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
