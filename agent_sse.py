@@ -158,7 +158,87 @@ class EmbeddingAgentSSE:
                 return (False, publish_time)
 
         return (False, 0)
-            
+
+    def publish_results_batch(self, results: List[tuple[str, Dict[str, Any], List[float]]]) -> tuple[bool, float]:
+        """Publish multiple results via HTTP facade batch endpoint.
+
+        Args:
+            results: List of (message_id, task, embedding) tuples
+
+        Returns:
+            (success, publish_time) tuple
+        """
+        if not results:
+            return (True, 0)
+
+        url = f"{self.facade_url}/api/streams/{self.result_stream}/messages/batch"
+
+        # Build batch payload
+        messages = []
+        for message_id, task, embedding in results:
+            result = {
+                'chunkUid': task['chunkUid'],
+                'bookId': task['bookId'],
+                'chunkIndex': task['chunkIndex'],
+                'sqlitePath': task['sqlitePath'],
+                'localChunkId': task['localChunkId'],
+                'modelName': MODEL_NAME,
+                'dim': EMBEDDING_DIMENSION,
+                'dtype': 'float32',
+                'embedding': embedding,
+                'taskMessageId': message_id
+            }
+            messages.append(result)
+
+        payload = {'messages': messages}
+
+        # Retry with exponential backoff
+        max_retries = 5
+        backoff = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                publish_start = time.time()
+                response = self.session.post(url, json=payload, timeout=60)  # Longer timeout for batch
+                publish_time = time.time() - publish_start
+
+                if response.status_code in (200, 201):
+                    return (True, publish_time)
+                else:
+                    print(f"[{self.agent_id}] Failed to batch publish {len(results)} results: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        print(f"[{self.agent_id}] Retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                        time.sleep(backoff)
+                        backoff *= 2
+                        continue
+                    return (False, publish_time)
+            except requests.exceptions.Timeout as e:
+                publish_time = time.time() - publish_start if 'publish_start' in locals() else 0
+                if attempt < max_retries - 1:
+                    print(f"[{self.agent_id}] Timeout batch publishing, retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
+                    print(f"[{self.agent_id}] Batch publish timeout after {max_retries} attempts: {e}")
+                    return (False, publish_time)
+            except requests.exceptions.ConnectionError as e:
+                publish_time = time.time() - publish_start if 'publish_start' in locals() else 0
+                if attempt < max_retries - 1:
+                    print(f"[{self.agent_id}] Connection error batch publishing, retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
+                    print(f"[{self.agent_id}] Batch publish connection error after {max_retries} attempts: {e}")
+                    return (False, publish_time)
+            except Exception as e:
+                publish_time = time.time() - publish_start if 'publish_start' in locals() else 0
+                print(f"[{self.agent_id}] Failed to batch publish results: {e}")
+                return (False, publish_time)
+
+        return (False, 0)
+
     def finish_message(self, message_id: str) -> bool:
         """Finish (ACK) a message with retry
         Uses the new API: POST /api/streams/{stream}/groups/{group}/consumers/{consumer}/messages/{messageId}/finish
@@ -267,20 +347,20 @@ class EmbeddingAgentSSE:
               f"Total processed={self.stats['tasks_processed']}")
     
     def _process_message_buffer(self, message_buffer: List[Dict[str, Any]], reason: str) -> None:
-        """Process all messages in the buffer using batch embedding computation.
-        
-        Embeddings are computed in batch for efficiency, but results are published
-        and messages are finished one by one for stability.
-        
+        """Process all messages in the buffer using batch embedding computation and batch publishing.
+
+        Embeddings are computed in batch, results are published in batch via facade batch API.
+        Messages are finished one by one (no batch finish API available).
+
         Args:
             message_buffer: List of messages to process (will be cleared after processing)
             reason: Description of why the buffer is being processed (for logging)
         """
         if not message_buffer:
             return
-        
+
         print(f"[{self.agent_id}] {reason}, processing {len(message_buffer)} messages")
-        
+
         # Extract texts and validate messages
         texts = []
         valid_messages = []
@@ -292,11 +372,11 @@ class EmbeddingAgentSSE:
                 valid_messages.append(msg)
             else:
                 print(f"[{self.agent_id}] No text field found in task message {msg.get('id', 'unknown')}, will be redelivered after timeout")
-        
+
         if not texts:
             message_buffer.clear()
             return
-        
+
         # Compute embeddings in batch
         print(f"[{self.agent_id}] Computing {len(texts)} embeddings in batch...")
         compute_start = time.time()
@@ -305,43 +385,73 @@ class EmbeddingAgentSSE:
                 # Use default batch_size=32 for memory efficiency on GPU
                 embeddings = compute_embeddings_batch(self.model, texts)
             compute_time = time.time() - compute_start
-            # Note: compute_time/len(texts) is amortized per-message time, not actual individual compute time
             print(f"[{self.agent_id}] Batch embedding completed in {compute_time:.3f}s ({compute_time/len(texts):.3f}s per message)")
         except Exception as e:
             print(f"[{self.agent_id}] Error computing batch embeddings: {e}, messages will be redelivered after timeout")
             message_buffer.clear()
             return
-        
-        # Publish and finish each message one by one
-        for i, (msg, embedding) in enumerate(zip(valid_messages, embeddings)):
-            message_id = msg['id']
-            task = msg['body']
-            
-            # Publish result
-            success, publish_time = self.publish_result(message_id, task, embedding)
-            
-            # Update stats (thread-safe)
+
+        # Prepare results for batch publishing
+        results = []
+        for msg, embedding in zip(valid_messages, embeddings):
+            results.append((msg['id'], msg['body'], embedding))
+
+        # Try batch publish first
+        batch_success, publish_time = self.publish_results_batch(results)
+
+        if batch_success:
+            # Batch publish succeeded - finish all messages and update stats
+            print(f"[{self.agent_id}] Batch published {len(results)} results in {publish_time:.3f}s ({publish_time/len(results):.3f}s per message)")
+
+            # Update stats for all messages
             with self.stats_lock:
-                self.stats['compute_times'].append(compute_time / len(texts))  # Amortized compute time
-                self.stats['publish_times'].append(publish_time)
+                amortized_compute = compute_time / len(results)
+                amortized_publish = publish_time / len(results)
+                for _ in results:
+                    self.stats['compute_times'].append(amortized_compute)
+                    self.stats['publish_times'].append(amortized_publish)
                 self.stats['last_message_time'] = datetime.now()
-            
-            if success:
-                # Send FINISH to allow next message delivery
+
+            # Finish each message (no batch finish API)
+            for i, (message_id, task, _) in enumerate(results):
                 self.finish_message(message_id)
-                
+
                 with self.stats_lock:
                     self.stats['tasks_processed'] += 1
-                
-                print(f"[{self.agent_id}] ✓ Task {task['chunkUid'][:16]}... completed ({i+1}/{len(valid_messages)}) | "
-                      f"Publish={publish_time:.3f}s")
-                
+
                 # Print stats every 10 tasks
                 if self.stats['tasks_processed'] % 10 == 0:
                     self._print_stats()
-            else:
-                print(f"[{self.agent_id}] Failed to publish result for {task['chunkUid'][:16]}..., will be redelivered after timeout")
-        
+
+            print(f"[{self.agent_id}] ✓ Batch completed: {len(results)} tasks | "
+                  f"Compute={compute_time:.3f}s | Publish={publish_time:.3f}s | "
+                  f"Total={compute_time + publish_time:.3f}s")
+        else:
+            # Batch publish failed - fallback to single publish
+            print(f"[{self.agent_id}] Batch publish failed, falling back to single publish...")
+
+            for i, (message_id, task, embedding) in enumerate(results):
+                success, publish_time = self.publish_result(message_id, task, embedding)
+
+                with self.stats_lock:
+                    self.stats['compute_times'].append(compute_time / len(results))
+                    self.stats['publish_times'].append(publish_time)
+                    self.stats['last_message_time'] = datetime.now()
+
+                if success:
+                    self.finish_message(message_id)
+
+                    with self.stats_lock:
+                        self.stats['tasks_processed'] += 1
+
+                    print(f"[{self.agent_id}] ✓ Task {task['chunkUid'][:16]}... completed ({i+1}/{len(results)}) | "
+                          f"Publish={publish_time:.3f}s")
+
+                    if self.stats['tasks_processed'] % 10 == 0:
+                        self._print_stats()
+                else:
+                    print(f"[{self.agent_id}] Failed to publish result for {task['chunkUid'][:16]}..., will be redelivered after timeout")
+
         message_buffer.clear()
               
     def run(self):
