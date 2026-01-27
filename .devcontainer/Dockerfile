@@ -1,4 +1,4 @@
-FROM python:3.11-bullseye
+FROM public.ecr.aws/docker/library/python:3.11-bullseye
 
 # Set working directory
 WORKDIR /workspace
