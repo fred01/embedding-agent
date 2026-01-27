@@ -280,7 +280,51 @@ class EmbeddingAgentSSE:
                 return False
 
         return False
-            
+
+    def finish_messages_batch(self, message_ids: List[str]) -> bool:
+        """Finish (ACK) multiple messages via batch API.
+
+        Uses: POST /api/streams/{stream}/groups/{group}/consumers/{consumer}/finish
+        Body: {"message_ids": ["id1", "id2", ...]}
+        """
+        if not message_ids:
+            return True
+
+        url = f"{self.facade_url}/api/streams/{self.task_stream}/groups/{self.task_group}/consumers/{self.consumer_name}/finish"
+        payload = {'message_ids': message_ids}
+
+        # Retry with exponential backoff
+        max_retries = 5
+        backoff = 1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(url, json=payload, timeout=30)
+                if response.status_code == 200:
+                    return True
+                else:
+                    print(f"[{self.agent_id}] Failed to batch finish {len(message_ids)} messages: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        print(f"[{self.agent_id}] Retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                        time.sleep(backoff)
+                        backoff *= 2
+                        continue
+                    return False
+            except requests.exceptions.ConnectionError as e:
+                if attempt < max_retries - 1:
+                    print(f"[{self.agent_id}] Connection error batch finishing, retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
+                    print(f"[{self.agent_id}] Batch finish connection error after {max_retries} attempts, treating as success")
+                    return True  # After retries exhausted, treat as success to not block
+            except Exception as e:
+                print(f"[{self.agent_id}] Failed to batch finish messages: {e}")
+                return False
+
+        return False
+
     def process_message(self, sse_message: Dict[str, Any]) -> bool:
         """Process a single SSE message. Returns True if successful."""
         message_id = sse_message['id']
@@ -400,32 +444,49 @@ class EmbeddingAgentSSE:
         batch_success, publish_time = self.publish_results_batch(results)
 
         if batch_success:
-            # Batch publish succeeded - finish all messages and update stats
+            # Batch publish succeeded - batch finish all messages
             print(f"[{self.agent_id}] Batch published {len(results)} results in {publish_time:.3f}s ({publish_time/len(results):.3f}s per message)")
 
-            # Update stats for all messages
-            with self.stats_lock:
-                amortized_compute = compute_time / len(results)
-                amortized_publish = publish_time / len(results)
-                for _ in results:
-                    self.stats['compute_times'].append(amortized_compute)
-                    self.stats['publish_times'].append(amortized_publish)
-                self.stats['last_message_time'] = datetime.now()
+            # Batch finish all messages
+            message_ids = [msg_id for msg_id, _, _ in results]
+            finish_start = time.time()
+            finish_success = self.finish_messages_batch(message_ids)
+            finish_time = time.time() - finish_start
 
-            # Finish each message (no batch finish API)
-            for i, (message_id, task, _) in enumerate(results):
-                self.finish_message(message_id)
+            if finish_success:
+                # Update stats for all messages
+                with self.stats_lock:
+                    amortized_compute = compute_time / len(results)
+                    amortized_publish = publish_time / len(results)
+                    for _ in results:
+                        self.stats['compute_times'].append(amortized_compute)
+                        self.stats['publish_times'].append(amortized_publish)
+                    self.stats['tasks_processed'] += len(results)
+                    self.stats['last_message_time'] = datetime.now()
+
+                    # Print stats if crossed 10-task boundary
+                    if self.stats['tasks_processed'] % 10 < len(results):
+                        self._print_stats()
+
+                print(f"[{self.agent_id}] ✓ Batch completed: {len(results)} tasks | "
+                      f"Compute={compute_time:.3f}s | Publish={publish_time:.3f}s | Finish={finish_time:.3f}s | "
+                      f"Total={compute_time + publish_time + finish_time:.3f}s")
+            else:
+                # Batch finish failed - fallback to single finish
+                print(f"[{self.agent_id}] Batch finish failed, falling back to single finish...")
+                for message_id, _, _ in results:
+                    self.finish_message(message_id)
 
                 with self.stats_lock:
-                    self.stats['tasks_processed'] += 1
+                    amortized_compute = compute_time / len(results)
+                    amortized_publish = publish_time / len(results)
+                    for _ in results:
+                        self.stats['compute_times'].append(amortized_compute)
+                        self.stats['publish_times'].append(amortized_publish)
+                    self.stats['tasks_processed'] += len(results)
+                    self.stats['last_message_time'] = datetime.now()
 
-                # Print stats every 10 tasks
-                if self.stats['tasks_processed'] % 10 == 0:
-                    self._print_stats()
-
-            print(f"[{self.agent_id}] ✓ Batch completed: {len(results)} tasks | "
-                  f"Compute={compute_time:.3f}s | Publish={publish_time:.3f}s | "
-                  f"Total={compute_time + publish_time:.3f}s")
+                print(f"[{self.agent_id}] ✓ Batch completed (single finish fallback): {len(results)} tasks")
         else:
             # Batch publish failed - fallback to single publish
             print(f"[{self.agent_id}] Batch publish failed, falling back to single publish...")
