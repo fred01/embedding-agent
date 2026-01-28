@@ -39,13 +39,38 @@ CMD ["python3", "-u", "agent_sse.py"]
 - **Workspace** - `/workspace` (весь проект)
 - **HuggingFace cache** - `~/.cache/huggingface` монтируется в контейнер для кеширования моделей
 
+## Docker Image
+
+DevContainer использует готовый образ из GitHub Container Registry:
+```
+ghcr.io/fred01/embedding-agent-devcontainer:latest
+```
+
+Образ содержит:
+- Python 3.11
+- Все зависимости из requirements.txt
+- CPU-only PyTorch
+- Предзагруженную модель BGE-M3 (~2GB)
+
+### Пересборка образа
+
+При изменении `requirements.txt` нужно пересобрать и запушить образ:
+
+```bash
+# Собрать образ
+docker build -f .devcontainer/Dockerfile.base -t ghcr.io/fred01/embedding-agent-devcontainer:latest .
+
+# Запушить в registry
+docker push ghcr.io/fred01/embedding-agent-devcontainer:latest
+```
+
 ## Использование
 
 ### С вашей системой
 
 Передайте `devcontainer.json` вашей системе. Она должна:
 
-1. Собрать образ из `.devcontainer/Dockerfile`
+1. Скачать образ из `ghcr.io/fred01/embedding-agent-devcontainer:latest`
 2. Запустить контейнер с переменными окружения
 3. CMD автоматически запустит `agent_sse.py`
 4. Контейнер будет работать, пока работает агент
@@ -65,17 +90,15 @@ export FACADE_URL="https://your-facade-url"
 ### Локально с Docker
 
 ```bash
-# Собрать образ
-docker build -f .devcontainer/Dockerfile -t embedding-agent .
-
-# Запустить с переменными окружения
+# Запустить с переменными окружения (образ скачается автоматически)
 docker run -it \
   --name embedding-agent \
   --network host \
   -e FACADE_TOKEN="your-token" \
   -e FACADE_URL="https://nsq.fred.org.ru" \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  embedding-agent
+  -v $(pwd):/workspace \
+  ghcr.io/fred01/embedding-agent-devcontainer:latest \
+  python3 -u agent_sse.py
 
 # Веб-дашборд доступен на http://localhost:5000
 ```

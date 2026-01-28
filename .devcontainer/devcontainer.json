@@ -1,9 +1,6 @@
 {
   "name": "Embedding Agent",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  "image": "ghcr.io/fred01/embedding-agent-devcontainer:latest",
 
   "customizations": {
     "vscode": {

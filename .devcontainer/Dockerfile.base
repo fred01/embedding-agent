@@ -1,0 +1,23 @@
+# Base image for devcontainer with all dependencies pre-installed
+# This image is built and pushed to ghcr.io by GitHub Actions
+FROM public.ecr.aws/docker/library/python:3.11-bullseye
+
+WORKDIR /workspace
+
+# Copy requirements for dependency installation
+COPY requirements.txt /tmp/requirements.txt
+
+# Install Python dependencies
+# CPU-only PyTorch for smaller image and faster startup
+RUN pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
+
+# Pre-download the BGE-M3 model to speed up first run
+RUN python -c "from FlagEmbedding import BGEM3FlagModel; BGEM3FlagModel('BAAI/bge-m3', use_fp16=False)"
+
+EXPOSE 8080
+
+ENV FORCE_CPU=true
+ENV PYTHONUNBUFFERED=1
