@@ -1,6 +1,6 @@
 # Base image for devcontainer with all dependencies pre-installed
 # This image is built and pushed to ghcr.io by GitHub Actions
-FROM public.ecr.aws/docker/library/python:3.11-bullseye
+FROM public.ecr.aws/docker/library/python:3.14-bookworm
 
 WORKDIR /workspace
 
