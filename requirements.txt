@@ -4,7 +4,7 @@ transformers>=4.30.0,<4.46.0
 sentencepiece>=0.1.99
 
 # BGE-M3 embedding model
-FlagEmbedding>=1.2.0
+FlagEmbedding>=1.2.0,<1.4.0
 
 # HTTP client
 requests>=2.31.0
