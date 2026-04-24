@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.14-bookworm
+FROM public.ecr.aws/docker/library/python:3.13-bookworm
 
 # Set working directory
 WORKDIR /workspace
