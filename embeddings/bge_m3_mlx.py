@@ -7,11 +7,10 @@ On first start the weights are taken from the transformers model and cached as f
 """
 
 import os
+import time
 from typing import List, Optional
 
 import numpy as np
-
-import time
 
 from .bge_m3 import EMBEDDING_DIMENSION, MAX_LENGTH, MODEL_NAME, DutyCycle
 
