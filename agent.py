@@ -20,6 +20,8 @@ Configuration (environment):
     FP16             auto | true | false                 (auto: fp16 on GPU/MPS, fp32 on CPU)
     BATCH_SIZE       model batch size (default: cuda 32, mlx/mps 16, cpu 4); lowered automatically on OOM
     TARGET_SECONDS   how much work to lease at once, in seconds of own throughput (default 120)
+    DUTY_CYCLE       share of time the GPU computes, e.g. 0.3 (default 1): pauses between batches, quieter fans
+    DUTY_CYCLE_FILE  file whose number overrides DUTY_CYCLE without a restart (re-read every 10 s)
     EMBED_URL        use an OpenAI-compatible /embeddings server (TEI, infinity, LiteLLM) instead of local torch
     EMBED_MODEL      model name for EMBED_URL (default BAAI/bge-m3), EMBED_API_KEY its key
     SKIP_REFERENCE_CHECK=true  skip the startup comparison with the FlagEmbedding reference vector
@@ -278,6 +280,9 @@ def main() -> None:
     log(f"Loading {MODEL_NAME}...")
     embedder = build_embedder(args)
     log(f"Model ready on {embedder.device_label}, batch {embedder.batch_size}")
+    duty_cycle = getattr(embedder, "duty_cycle", None)
+    if duty_cycle and (duty_cycle.default < 1 or duty_cycle.path):
+        log(f"Duty cycle {duty_cycle.current():g}" + (f" (file {duty_cycle.path})" if duty_cycle.path else ""))
 
     if os.getenv("SKIP_REFERENCE_CHECK", "").lower() not in ("1", "true", "yes"):
         cosine = check_reference(embedder)

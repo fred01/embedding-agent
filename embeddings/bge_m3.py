@@ -33,6 +33,46 @@ def detect_device() -> str:
     return "cpu"
 
 
+class DutyCycle:
+    """
+    Keeps the GPU busy only a share of the time: after each batch sleeps so that compute is DUTY_CYCLE of the
+    wall time (0.3 = 30% busy, 70% idle). Less heat, slower fans; the lease size follows on its own because
+    the agent's measured rate includes the pauses.
+
+    DUTY_CYCLE (default 1 = no pauses) can be changed without a restart through DUTY_CYCLE_FILE: if that file
+    exists, its number wins (re-read every 10 s), e.g. `echo 0.3 > /tmp/duty_cycle`.
+    """
+
+    def __init__(self, duty: float = 1.0, path: Optional[str] = None):
+        self.default = duty
+        self.duty = duty
+        self.path = path
+        self.checked = 0.0
+
+    @classmethod
+    def from_env(cls) -> "DutyCycle":
+        return cls(float(os.getenv("DUTY_CYCLE", "1")), os.getenv("DUTY_CYCLE_FILE") or None)
+
+    def current(self) -> float:
+        if self.path and time.time() - self.checked > 10:
+            self.checked = time.time()
+            duty = self.default
+            try:
+                with open(self.path) as f:
+                    duty = float(f.read().strip())
+            except (OSError, ValueError):
+                pass
+            if duty != self.duty:
+                print(f"Duty cycle {self.duty:g} -> {duty:g}", flush=True)
+            self.duty = duty
+        return min(1.0, max(0.01, self.duty))
+
+    def pause(self, busy_seconds: float) -> None:
+        duty = self.current()
+        if duty < 1.0:
+            time.sleep(busy_seconds * (1.0 / duty - 1.0))
+
+
 def default_batch_size(device: str) -> int:
     if device.startswith("cuda"):
         return 32
@@ -66,6 +106,7 @@ class TorchEmbedder:
         if self.fp16:
             model = model.half()
         self.model = model.to(self.device).eval()
+        self.duty_cycle = DutyCycle.from_env()
 
         if self.device == "cpu":
             torch.set_num_threads(int(os.getenv("CPU_THREADS", "0")) or os.cpu_count() or 1)
@@ -92,7 +133,9 @@ class TorchEmbedder:
         while pos < len(order):
             idx = order[pos:pos + batch_size]
             try:
+                started = time.time()
                 out[idx] = self._embed_batch([texts[i] for i in idx])
+                self.duty_cycle.pause(time.time() - started)
             except RuntimeError as e:
                 if "out of memory" not in str(e).lower() or batch_size == 1:
                     raise

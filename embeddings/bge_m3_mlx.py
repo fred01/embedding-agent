@@ -11,7 +11,9 @@ from typing import List, Optional
 
 import numpy as np
 
-from .bge_m3 import EMBEDDING_DIMENSION, MAX_LENGTH, MODEL_NAME
+import time
+
+from .bge_m3 import EMBEDDING_DIMENSION, MAX_LENGTH, MODEL_NAME, DutyCycle
 
 CACHE_DIR = os.path.expanduser(os.getenv("MLX_CACHE_DIR", "~/.cache/embedding-agent"))
 
@@ -153,6 +155,7 @@ class MlxEmbedder:
         self.mx = mx
         self.dtype = dtype
         self.batch_size = batch_size or 16
+        self.duty_cycle = DutyCycle.from_env()
         self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         self.model = _build_model(AutoConfig.from_pretrained(MODEL_NAME).to_dict())
@@ -173,6 +176,8 @@ class MlxEmbedder:
             idx = order[pos:pos + self.batch_size]
             encoded = self.tokenizer([texts[i] for i in idx], padding=True, truncation=True,
                                      max_length=self.max_length, return_tensors="np")
+            started = time.time()
             vectors = self.model(mx.array(encoded["input_ids"]), mx.array(encoded["attention_mask"]))
             out[idx] = np.array(vectors)
+            self.duty_cycle.pause(time.time() - started)
         return out
