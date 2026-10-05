@@ -27,6 +27,7 @@ Configuration (environment):
     TARGET_SECONDS   how much work to lease at once, in seconds of own throughput (default 120)
     DUTY_CYCLE       share of time the GPU computes, e.g. 0.3 (default 1): pauses between batches, quieter fans
     DUTY_CYCLE_FILE  file whose number overrides DUTY_CYCLE without a restart (re-read every 10 s)
+    GPU_FAN_SPEED, GPU_POWER_LIMIT, GPU_TARGET_TEMP  quiet NVIDIA GPU while working (root): see embeddings/gpu_cooling.py
     EMBED_URL        use an OpenAI-compatible /embeddings server (TEI, infinity, LiteLLM) instead of local torch
     EMBED_MODEL      model name for EMBED_URL (default BAAI/bge-m3), EMBED_API_KEY its key
     SKIP_REFERENCE_CHECK=true  skip the startup comparison with the FlagEmbedding reference vector
@@ -58,6 +59,7 @@ from embeddings import (
     measure_rate,
     mlx_available,
 )
+from embeddings.gpu_cooling import GpuCooling
 
 VERSION = "2.2.0"
 DEFAULT_INDEXER_URL = "https://book-indexer.svc.fred.org.ru"
@@ -170,8 +172,10 @@ def free_device_memory() -> None:
 
 class Agent:
     def __init__(self, client: IndexerClient, embedder, target_seconds: float, rate: float,
-                 load_embedder: Optional[Callable[[int], object]] = None):
+                 load_embedder: Optional[Callable[[int], object]] = None, cooling: Optional[GpuCooling] = None):
         self.client = client
+        # fan / power limit of an NVIDIA card: taken over while working, given back during a pause
+        self.cooling = cooling
         self.embedder = embedder
         # builds a ready embedder (model + reference check) again after a pause, given the batch size
         self.load_embedder = load_embedder
@@ -276,6 +280,8 @@ class Agent:
         while self.results.unfinished_tasks and not self.stop.is_set():
             time.sleep(0.5)
         self.client.release()
+        if self.cooling:
+            self.cooling.pause()
         batch_size = self.embedder.batch_size
         if self.load_embedder is not None:
             self.embedder = None
@@ -291,6 +297,8 @@ class Agent:
             log(f"Resuming: loading {MODEL_NAME}...")
             self.embedder = self.load_embedder(batch_size)
             log(f"Model ready on {self.embedder.device_label}")
+        if self.cooling:
+            self.cooling.resume()
         self.drop_prefetched()
 
     def drop_prefetched(self) -> None:
@@ -380,45 +388,55 @@ def main() -> None:
     if duty_cycle and (duty_cycle.default < 1 or duty_cycle.path):
         log(f"Duty cycle {duty_cycle.current():g}" + (f" (file {duty_cycle.path})" if duty_cycle.path else ""))
 
-    check = os.getenv("SKIP_REFERENCE_CHECK", "").lower() not in ("1", "true", "yes")
-    if check:
-        cosine = check_reference(embedder)
-        log(f"Reference check passed: cosine {cosine:.5f} with FlagEmbedding")
-
-    def reload_embedder(batch_size: int):
-        """After a pause: the same model on the same device, checked again; keeps the batch size it settled on."""
-        fresh = build_embedder(args)
-        fresh.batch_size = batch_size
+    # NVIDIA only, needs root: fixed fan, power limit, duty cycle following the temperature
+    cooling = None if isinstance(embedder, HttpEmbedder) else GpuCooling.from_env(embedder.device)
+    if cooling:
+        cooling.start()
+    try:
+        check = os.getenv("SKIP_REFERENCE_CHECK", "").lower() not in ("1", "true", "yes")
         if check:
-            log(f"Reference check passed: cosine {check_reference(fresh):.5f} with FlagEmbedding")
-        return fresh
+            cosine = check_reference(embedder)
+            log(f"Reference check passed: cosine {cosine:.5f} with FlagEmbedding")
 
-    rate = measure_rate(embedder, args.benchmark or max(4, embedder.batch_size))
-    log(f"Measured speed: {rate:.2f} chunks/s on 600-word chunks")
-    if args.benchmark:
-        return
+        def reload_embedder(batch_size: int):
+            """After a pause: the same model on the same device, checked again; keeps the batch size it settled on."""
+            fresh = build_embedder(args)
+            fresh.batch_size = batch_size
+            if check:
+                log(f"Reference check passed: cosine {check_reference(fresh):.5f} with FlagEmbedding")
+            return fresh
 
-    worker = os.getenv("WORKER_NAME") or f"{socket.gethostname()}-{embedder.device.replace(':', '')}"
-    client = IndexerClient(indexer_url, token, worker)
-    agent = Agent(client, embedder, float(os.getenv("TARGET_SECONDS", "120")), rate,
-                  load_embedder=None if isinstance(embedder, HttpEmbedder) else reload_embedder)
-    # the agent owns the model now: no other reference may keep it in memory during a pause
-    del embedder, duty_cycle
+        rate = measure_rate(embedder, args.benchmark or max(4, embedder.batch_size))
+        log(f"Measured speed: {rate:.2f} chunks/s on 600-word chunks")
+        if args.benchmark:
+            return
 
-    def shutdown(signum, _frame):
-        log(f"Signal {signum}: finishing the current batch and releasing leases...")
-        agent.stop.set()
+        worker = os.getenv("WORKER_NAME") or f"{socket.gethostname()}-{embedder.device.replace(':', '')}"
+        client = IndexerClient(indexer_url, token, worker)
+        agent = Agent(client, embedder, float(os.getenv("TARGET_SECONDS", "120")), rate,
+                      load_embedder=None if isinstance(embedder, HttpEmbedder) else reload_embedder, cooling=cooling)
+        if cooling:
+            cooling.duty_cycle = lambda: getattr(agent.embedder, "duty_cycle", None)
+        # the agent owns the model now: no other reference may keep it in memory during a pause
+        del embedder, duty_cycle
 
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+        def shutdown(signum, _frame):
+            log(f"Signal {signum}: finishing the current batch and releasing leases...")
+            agent.stop.set()
 
-    info = client.info(agent.stop)
-    if info.get("model") != MODEL_NAME or info.get("dimension") != EMBEDDING_DIMENSION:
-        sys.exit(f"Indexer expects {info.get('model')} / {info.get('dimension')}, this agent computes "
-                 f"{MODEL_NAME} / {EMBEDDING_DIMENSION}")
-    log(f"Worker {worker} working for {indexer_url}")
-    agent.run()
-    log("Stopped by the indexer" if agent.stopped_by_indexer else "Stopped")
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+
+        info = client.info(agent.stop)
+        if info.get("model") != MODEL_NAME or info.get("dimension") != EMBEDDING_DIMENSION:
+            sys.exit(f"Indexer expects {info.get('model')} / {info.get('dimension')}, this agent computes "
+                     f"{MODEL_NAME} / {EMBEDDING_DIMENSION}")
+        log(f"Worker {worker} working for {indexer_url}")
+        agent.run()
+        log("Stopped by the indexer" if agent.stopped_by_indexer else "Stopped")
+    finally:
+        if cooling:
+            cooling.stop()
 
 
 if __name__ == "__main__":
