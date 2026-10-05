@@ -12,6 +12,11 @@ Pulls work straight from the indexer, no queue in between:
 The next lease is fetched and the previous results are sent while the model is busy, so the GPU does not
 wait for the network. If the agent dies, its leases expire on the indexer and the books are handed out again.
 
+Pause and stop buttons on the indexer's vectorization page reach the agent with lease / results responses:
+    PAUSE  finish the current batch, send it, give the other books back, unload the model (frees the GPU),
+           keep asking the indexer; on resume load the model again (with the reference check) and go on
+    STOP   finish the current batch, send it, give the other books back and exit (code 0)
+
 Configuration (environment):
     INDEXER_URL      indexer base URL (default https://book-indexer.svc.fred.org.ru)
     AGENT_TOKEN      bearer token (FACADE_TOKEN on the indexer); RS_HTTP_FACADE_TOKEN / FACADE_TOKEN also read
@@ -28,6 +33,7 @@ Configuration (environment):
 """
 
 import argparse
+import gc
 import os
 import queue
 import signal
@@ -35,7 +41,8 @@ import socket
 import sys
 import threading
 import time
-from typing import Dict, List, Optional
+import uuid
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -52,7 +59,7 @@ from embeddings import (
     mlx_available,
 )
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 DEFAULT_INDEXER_URL = "https://book-indexer.svc.fred.org.ru"
 SUBMIT_PART = 128          # chunks per POST /results (~700 KB of JSON)
 MAX_CHUNKS_PER_LEASE = 2000
@@ -66,6 +73,8 @@ class IndexerClient:
     def __init__(self, url: str, token: str, worker: str):
         self.url = url.rstrip("/") + "/api/agent/embeddings"
         self.worker = worker
+        # new on every start: the indexer binds STOP to the process that received it
+        self.session_id = uuid.uuid4().hex
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {token}", "Accept-Encoding": "gzip"})
 
@@ -117,6 +126,7 @@ class IndexerClient:
             "device": device,
             "backend": backend,
             "version": VERSION,
+            "session": self.session_id,
         }, timeout=120, stop=stop)
 
     def submit(self, results: List[dict], done: List[str], rate: float, stop: threading.Event) -> dict:
@@ -126,6 +136,7 @@ class IndexerClient:
             "results": results,
             "done": done,
             "chunksPerSec": round(rate, 3),
+            "session": self.session_id,
         }, timeout=600, stop=stop)
 
     def release(self) -> None:
@@ -137,13 +148,41 @@ class IndexerClient:
             log(f"Release failed ({e}); leases will expire on their own")
 
 
+def free_device_memory() -> None:
+    """Give cached GPU / Apple GPU memory back after the model is dropped."""
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception as e:  # noqa: BLE001 - best effort
+            log(f"Could not free torch memory: {e}")
+    if "mlx.core" in sys.modules:
+        mx = sys.modules["mlx.core"]
+        try:
+            (getattr(mx, "clear_cache", None) or mx.metal.clear_cache)()
+        except Exception as e:  # noqa: BLE001
+            log(f"Could not free MLX memory: {e}")
+
+
 class Agent:
-    def __init__(self, client: IndexerClient, embedder, target_seconds: float, rate: float):
+    def __init__(self, client: IndexerClient, embedder, target_seconds: float, rate: float,
+                 load_embedder: Optional[Callable[[int], object]] = None):
         self.client = client
         self.embedder = embedder
+        # builds a ready embedder (model + reference check) again after a pause, given the batch size
+        self.load_embedder = load_embedder
+        self.device_label = embedder.device_label
+        self.backend = embedder.backend
         self.target_seconds = target_seconds
         self.rate = rate  # chunks per second, exponential moving average of compute only
         self.stop = threading.Event()
+        # PAUSE from the indexer: no new work, model unloaded until it is lifted
+        self.paused = threading.Event()
+        self.stopped_by_indexer = False
         # set only when shutdown gives up on sending computed results
         self.abort = threading.Event()
         self.leases: "queue.Queue[dict]" = queue.Queue(maxsize=1)
@@ -154,19 +193,38 @@ class Agent:
     def max_chunks(self) -> int:
         return int(min(MAX_CHUNKS_PER_LEASE, max(1, self.rate * self.target_seconds)))
 
+    def on_command(self, command: Optional[str]) -> None:
+        """Command from a lease or results response (buttons on the vectorization page)."""
+        if command == "STOP":
+            if not self.stop.is_set():
+                log("Stop requested by the indexer: finishing the current batch, then exiting")
+                self.stopped_by_indexer = True
+                self.stop.set()
+        elif command == "PAUSE":
+            if not self.paused.is_set():
+                log("Pause requested by the indexer: finishing the current batch, then freeing the device")
+                self.paused.set()
+        elif self.paused.is_set():
+            log("Pause lifted by the indexer")
+            self.paused.clear()
+
     # -- threads -----------------------------------------------------------
 
     def fetch_loop(self) -> None:
         """Keeps one lease ready while the model works on the current one."""
         while not self.stop.is_set():
             try:
-                lease = self.client.lease(self.max_chunks(), self.rate, self.embedder.device_label,
-                                          self.embedder.backend, self.stop)
+                lease = self.client.lease(self.max_chunks(), self.rate, self.device_label,
+                                          self.backend, self.stop)
             except ConnectionError:
                 continue
             except ValueError as e:
                 log(f"Lease failed: {e}")
                 self.stop.wait(30)
+                continue
+            self.on_command(lease.get("command"))
+            if lease.get("command"):
+                self.stop.wait(lease.get("retryAfterSeconds") or 10)
                 continue
             if not lease.get("books"):
                 wait = lease.get("retryAfterSeconds") or 60
@@ -192,6 +250,8 @@ class Agent:
                 log(f"Results not sent ({e}); the books will be handed out again when the lease expires")
             except ValueError as e:
                 log(f"Results rejected: {e}")
+            finally:
+                self.results.task_done()
 
     def submit(self, lease: dict, vectors) -> None:
         """Send results in parts; a book is reported done in the part with its last chunk."""
@@ -204,11 +264,42 @@ class Agent:
                              "vector": encode_vector(vectors[i])})
                 i += 1
                 if len(part) >= SUBMIT_PART:
-                    self.client.submit(part, done, self.rate, self.abort)
+                    self.on_command(self.client.submit(part, done, self.rate, self.abort).get("command"))
                     part, done = [], []
             done.append(book["bookId"])
         if part or done:
-            self.client.submit(part, done, self.rate, self.abort)
+            self.on_command(self.client.submit(part, done, self.rate, self.abort).get("command"))
+
+    def pause(self) -> None:
+        """Send what is computed, give the leased books back, unload the model and wait for the pause to end."""
+        self.drop_prefetched()
+        while self.results.unfinished_tasks and not self.stop.is_set():
+            time.sleep(0.5)
+        self.client.release()
+        batch_size = self.embedder.batch_size
+        if self.load_embedder is not None:
+            self.embedder = None
+            free_device_memory()
+            log("Paused: model unloaded, device is free")
+        else:
+            log("Paused")
+        while self.paused.is_set() and not self.stop.is_set():
+            self.stop.wait(1)
+        if self.stop.is_set():
+            return
+        if self.embedder is None:
+            log(f"Resuming: loading {MODEL_NAME}...")
+            self.embedder = self.load_embedder(batch_size)
+            log(f"Model ready on {self.embedder.device_label}")
+        self.drop_prefetched()
+
+    def drop_prefetched(self) -> None:
+        """A lease fetched before the pause: its books are released along with the rest."""
+        try:
+            while True:
+                self.leases.get_nowait()
+        except queue.Empty:
+            pass
 
     # -- main --------------------------------------------------------------
 
@@ -219,10 +310,15 @@ class Agent:
         submitter.start()
         try:
             while not self.stop.is_set():
+                if self.paused.is_set():
+                    self.pause()
+                    continue
                 try:
                     lease = self.leases.get(timeout=1)
                 except queue.Empty:
                     continue
+                if self.paused.is_set():
+                    continue  # released by pause() together with the other books
                 texts = [chunk["text"] for book in lease["books"] for chunk in book["chunks"]]
                 started = time.time()
                 vectors = self.embedder.embed(texts)
@@ -284,9 +380,18 @@ def main() -> None:
     if duty_cycle and (duty_cycle.default < 1 or duty_cycle.path):
         log(f"Duty cycle {duty_cycle.current():g}" + (f" (file {duty_cycle.path})" if duty_cycle.path else ""))
 
-    if os.getenv("SKIP_REFERENCE_CHECK", "").lower() not in ("1", "true", "yes"):
+    check = os.getenv("SKIP_REFERENCE_CHECK", "").lower() not in ("1", "true", "yes")
+    if check:
         cosine = check_reference(embedder)
         log(f"Reference check passed: cosine {cosine:.5f} with FlagEmbedding")
+
+    def reload_embedder(batch_size: int):
+        """After a pause: the same model on the same device, checked again; keeps the batch size it settled on."""
+        fresh = build_embedder(args)
+        fresh.batch_size = batch_size
+        if check:
+            log(f"Reference check passed: cosine {check_reference(fresh):.5f} with FlagEmbedding")
+        return fresh
 
     rate = measure_rate(embedder, args.benchmark or max(4, embedder.batch_size))
     log(f"Measured speed: {rate:.2f} chunks/s on 600-word chunks")
@@ -295,7 +400,10 @@ def main() -> None:
 
     worker = os.getenv("WORKER_NAME") or f"{socket.gethostname()}-{embedder.device.replace(':', '')}"
     client = IndexerClient(indexer_url, token, worker)
-    agent = Agent(client, embedder, float(os.getenv("TARGET_SECONDS", "120")), rate)
+    agent = Agent(client, embedder, float(os.getenv("TARGET_SECONDS", "120")), rate,
+                  load_embedder=None if isinstance(embedder, HttpEmbedder) else reload_embedder)
+    # the agent owns the model now: no other reference may keep it in memory during a pause
+    del embedder, duty_cycle
 
     def shutdown(signum, _frame):
         log(f"Signal {signum}: finishing the current batch and releasing leases...")
@@ -310,7 +418,7 @@ def main() -> None:
                  f"{MODEL_NAME} / {EMBEDDING_DIMENSION}")
     log(f"Worker {worker} working for {indexer_url}")
     agent.run()
-    log("Stopped")
+    log("Stopped by the indexer" if agent.stopped_by_indexer else "Stopped")
 
 
 if __name__ == "__main__":
