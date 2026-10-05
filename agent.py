@@ -61,7 +61,7 @@ from embeddings import (
 )
 from embeddings.gpu_cooling import GpuCooling
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 DEFAULT_INDEXER_URL = "https://book-indexer.svc.fred.org.ru"
 SUBMIT_PART = 128          # chunks per POST /results (~700 KB of JSON)
 MAX_CHUNKS_PER_LEASE = 2000
@@ -280,6 +280,8 @@ class Agent:
         while self.results.unfinished_tasks and not self.stop.is_set():
             time.sleep(0.5)
         self.client.release()
+        # a lease fetched before the release is void now; the first one after the pause is lifted is not
+        self.drop_prefetched()
         if self.cooling:
             self.cooling.pause()
         batch_size = self.embedder.batch_size
@@ -299,7 +301,6 @@ class Agent:
             log(f"Model ready on {self.embedder.device_label}")
         if self.cooling:
             self.cooling.resume()
-        self.drop_prefetched()
 
     def drop_prefetched(self) -> None:
         """A lease fetched before the pause: its books are released along with the rest."""
