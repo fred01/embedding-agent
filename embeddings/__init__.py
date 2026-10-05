@@ -17,6 +17,7 @@ from .bge_m3 import (
     encode_vector,
     measure_rate,
 )
+from .bge_m3_mlx import MlxEmbedder, mlx_available
 
 __all__ = [
     "EMBEDDING_DIMENSION",
@@ -29,4 +30,6 @@ __all__ = [
     "detect_device",
     "encode_vector",
     "measure_rate",
+    "MlxEmbedder",
+    "mlx_available",
 ]

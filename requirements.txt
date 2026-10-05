@@ -4,3 +4,5 @@ torch>=2.2.0
 transformers>=4.44.0
 numpy>=1.24
 requests>=2.31.0
+# Apple Silicon: MLX backend (DEVICE=auto picks it), ~1.5x faster than PyTorch on MPS
+mlx>=0.25; sys_platform == "darwin" and platform_machine == "arm64"

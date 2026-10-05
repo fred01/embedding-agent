@@ -40,7 +40,7 @@ AGENT_TOKEN=... ./start.sh
 | Платформа | Устройство | Точность | Батч |
 |-----------|------------|----------|------|
 | Linux + NVIDIA | `cuda` | fp16 | 32 |
-| macOS, Apple Silicon (M1–M5) | `mps` (GPU через Metal) | fp16 | 16 |
+| macOS, Apple Silicon (M1–M5) | `mlx` (GPU через MLX; `DEVICE=mps` — PyTorch) | fp16 | 16 |
 | остальное | `cpu` | fp32 | 4 |
 
 Замер скорости без подключения к индексеру: `./start.sh --benchmark 64`.
@@ -53,8 +53,12 @@ AGENT_TOKEN=... WORKER_NAME=macbook-m5max ./start.sh
 ```
 
 Нужен Python 3.10+ (`brew install python`). Модель (~2.3 ГБ) скачивается в `~/.cache/huggingface` при первом
-запуске. Mac не должен засыпать: `caffeinate -i ./start.sh`. Если какой-то операции нет на MPS, она
-выполнится на CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1` ставится автоматически).
+запуске. Mac не должен засыпать: `caffeinate -i ./start.sh`.
+
+По умолчанию на Mac считает MLX: тот же проход XLM-RoBERTa, что в transformers, но с fused attention. На M5 Max
+на свободном GPU — 41.8 чанка/с против 27.8 у PyTorch на MPS, косинус с эталоном 1.00000. При первом запуске веса
+конвертируются в fp16 и кэшируются в `~/.cache/embedding-agent`. `DEVICE=mps` возвращает PyTorch; если какой-то
+операции нет на MPS, она выполнится на CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1` ставится автоматически).
 
 ### NVIDIA в Docker
 
@@ -88,7 +92,7 @@ EMBED_URL=http://gpu-box:8080/v1 AGENT_TOKEN=... python agent.py
 | `AGENT_TOKEN` | — | Токен индексера (`FACADE_TOKEN` в секретах деплоя). Читаются и старые `RS_HTTP_FACADE_TOKEN`, `FACADE_TOKEN` |
 | `INDEXER_URL` | `https://book-indexer.svc.fred.org.ru` | Адрес индексера |
 | `WORKER_NAME` | `<hostname>-<device>` | Уникальное имя агента: под ним индексер ведёт аренды и статистику |
-| `DEVICE` | `auto` | `auto`, `cuda`, `cuda:N`, `mps`, `cpu` (`--cpu` и `FORCE_CPU=true` = `cpu`) |
+| `DEVICE` | `auto` | `auto`, `mlx`, `cuda`, `cuda:N`, `mps`, `cpu` (`--cpu` и `FORCE_CPU=true` = `cpu`) |
 | `FP16` | `auto` | fp16 на GPU/MPS, fp32 на CPU |
 | `BATCH_SIZE` | по устройству | Размер батча модели; при нехватке памяти уменьшается сам |
 | `TARGET_SECONDS` | `120` | Сколько секунд работы брать за одну аренду |

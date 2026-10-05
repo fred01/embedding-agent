@@ -16,9 +16,9 @@ Configuration (environment):
     INDEXER_URL      indexer base URL (default https://book-indexer.svc.fred.org.ru)
     AGENT_TOKEN      bearer token (FACADE_TOKEN on the indexer); RS_HTTP_FACADE_TOKEN / FACADE_TOKEN also read
     WORKER_NAME      unique name of this agent (default: <hostname>-<device>)
-    DEVICE           auto | cuda | cuda:N | mps | cpu   (--cpu = DEVICE=cpu; FORCE_CPU=true also works)
+    DEVICE           auto | mlx | cuda | cuda:N | mps | cpu   (auto: mlx on Apple Silicon; --cpu = DEVICE=cpu)
     FP16             auto | true | false                 (auto: fp16 on GPU/MPS, fp32 on CPU)
-    BATCH_SIZE       model batch size (default: cuda 32, mps 16, cpu 4); lowered automatically on OOM
+    BATCH_SIZE       model batch size (default: cuda 32, mlx/mps 16, cpu 4); lowered automatically on OOM
     TARGET_SECONDS   how much work to lease at once, in seconds of own throughput (default 120)
     EMBED_URL        use an OpenAI-compatible /embeddings server (TEI, infinity, LiteLLM) instead of local torch
     EMBED_MODEL      model name for EMBED_URL (default BAAI/bge-m3), EMBED_API_KEY its key
@@ -41,14 +41,16 @@ from embeddings import (
     EMBEDDING_DIMENSION,
     MODEL_NAME,
     HttpEmbedder,
+    MlxEmbedder,
     TorchEmbedder,
     check_reference,
     detect_device,
     encode_vector,
     measure_rate,
+    mlx_available,
 )
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DEFAULT_INDEXER_URL = "https://book-indexer.svc.fred.org.ru"
 SUBMIT_PART = 128          # chunks per POST /results (~700 KB of JSON)
 MAX_CHUNKS_PER_LEASE = 2000
@@ -251,10 +253,12 @@ def build_embedder(args):
     if args.cpu or os.getenv("FORCE_CPU", "").lower() in ("1", "true", "yes"):
         device = "cpu"
     if device in ("", "auto"):
-        device = detect_device()
+        device = "mlx" if mlx_available() else detect_device()
+    batch_size = int(os.getenv("BATCH_SIZE", "0")) or None
+    if device == "mlx":
+        return MlxEmbedder(batch_size=batch_size)
     fp16_env = os.getenv("FP16", "auto").lower()
     fp16 = None if fp16_env == "auto" else fp16_env in ("1", "true", "yes")
-    batch_size = int(os.getenv("BATCH_SIZE", "0")) or None
     return TorchEmbedder(device=device, fp16=fp16, batch_size=batch_size)
 
 
