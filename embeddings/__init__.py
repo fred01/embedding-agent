@@ -1,29 +1,32 @@
 """
-Shared embedding utilities for the book search system.
+BGE-M3 dense embeddings for the book search system (fred01/search-lib).
 
-This module provides the canonical implementation for computing text embeddings
-using BGE-M3 model. All services that need to compute embeddings MUST use this
-module to ensure consistency across the system.
-
-Model: BAAI/bge-m3
-Dimension: 1024
-Max Length: 8192
+Model: BAAI/bge-m3, dense vector (CLS, L2-normalized), dimension 1024.
+The indexer accepts only these vectors: they must match the ones already stored in Qdrant.
 """
 
-from .bge_embeddings import (
-    MODEL_NAME,
+from .bge_m3 import (
     EMBEDDING_DIMENSION,
     MAX_LENGTH,
-    load_model,
-    compute_embedding,
-    compute_embeddings_batch
+    MODEL_NAME,
+    HttpEmbedder,
+    TorchEmbedder,
+    check_reference,
+    decode_vector,
+    detect_device,
+    encode_vector,
+    measure_rate,
 )
 
 __all__ = [
-    'MODEL_NAME',
-    'EMBEDDING_DIMENSION',
-    'MAX_LENGTH',
-    'load_model',
-    'compute_embedding',
-    'compute_embeddings_batch'
+    "EMBEDDING_DIMENSION",
+    "MAX_LENGTH",
+    "MODEL_NAME",
+    "HttpEmbedder",
+    "TorchEmbedder",
+    "check_reference",
+    "decode_vector",
+    "detect_device",
+    "encode_vector",
+    "measure_rate",
 ]

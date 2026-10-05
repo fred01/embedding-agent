@@ -19,26 +19,13 @@
 
 
   "containerEnv": {
-    "FACADE_URL": "${localEnv:FACADE_URL:http://localhost:8090}",
-    "FACADE_TOKEN": "${localEnv:FACADE_TOKEN:default-token}",
-    "TASK_STREAM": "${localEnv:TASK_STREAM:embedding_tasks}",
-    "TASK_GROUP": "${localEnv:TASK_GROUP:embedding-agent}",
-    "RESULT_STREAM": "${localEnv:RESULT_STREAM:embedding_results}",
-    "WEB_PORT": "${localEnv:WEB_PORT:8080}",
-    "FORCE_CPU": "true",
+    "INDEXER_URL": "${localEnv:INDEXER_URL:https://book-indexer.svc.fred.org.ru}",
+    "AGENT_TOKEN": "${localEnv:AGENT_TOKEN}",
+    "RS_HTTP_FACADE_TOKEN": "${localEnv:RS_HTTP_FACADE_TOKEN}",
+    "WORKER_NAME": "${localEnv:WORKER_NAME}",
+    "DEVICE": "cpu",
     "PYTHONUNBUFFERED": "1"
   },
-
-  "forwardPorts": [8080],
-
-  "portsAttributes": {
-    "8080": {
-      "label": "Web Dashboard",
-      "onAutoForward": "notify"
-    }
-  },
-
-  "runArgs": ["--publish", "8080:8080"],
 
   "workspaceFolder": "/workspaces/work/embedding-agent",
 

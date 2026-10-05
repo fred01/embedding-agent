@@ -1,0 +1,17 @@
+# Agent for NVIDIA GPU hosts:
+#   docker build -f Dockerfile.cuda -t embedding-agent:cuda .
+#   docker run --gpus all -e AGENT_TOKEN=... -e WORKER_NAME=$(hostname)-gpu0 embedding-agent:cuda
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir transformers numpy requests
+
+# Model in the image: no 2 GB download on every start
+RUN python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('BAAI/bge-m3'); AutoModel.from_pretrained('BAAI/bge-m3')"
+
+COPY embeddings ./embeddings
+COPY agent.py .
+
+ENV PYTHONUNBUFFERED=1 DEVICE=cuda
+CMD ["python", "-u", "agent.py"]

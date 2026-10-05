@@ -1,27 +1,17 @@
 FROM public.ecr.aws/docker/library/python:3.13-bookworm
 
-# Set working directory
 WORKDIR /workspace
 
-# Copy requirements first for better caching
 COPY requirements.txt /tmp/requirements.txt
 
-# Install Python dependencies
-# CPU-only PyTorch for smaller image and faster startup
+# CPU-only PyTorch for a small image; GPU hosts: see Dockerfile.cuda in the repo root
 RUN pip install --upgrade pip && \
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install -r /tmp/requirements.txt
 
-# Copy the entire project
 COPY . /workspace/
 
-# Expose web dashboard port
-EXPOSE 8080
-
-# Set environment variable to force CPU (can be overridden)
-ENV FORCE_CPU=true
+ENV DEVICE=cpu
 ENV PYTHONUNBUFFERED=1
 
-# Keep container running by starting the agent
-# This is the key command that keeps the container alive
-CMD ["python3", "-u", "agent_sse.py"]
+CMD ["python3", "-u", "agent.py"]
