@@ -329,9 +329,15 @@ class Agent:
                 if self.paused.is_set():
                     continue  # released by pause() together with the other books
                 texts = [chunk["text"] for book in lease["books"] for chunk in book["chunks"]]
-                started = time.time()
+                # Монотонные часы, а не time.time(): настенные прыгают за NTP,
+                # и при коррекции назад разность выходит отрицательной. Однажды
+                # так и вышло — после загрузки часы сдвинулись на два часа,
+                # пачка «посчиталась за 0.0 с», rate взлетел до 2e9 и через
+                # max_chunks заставил агента брать вдвое больше книг, чем он
+                # успевает за TARGET_SECONDS.
+                started = time.monotonic()
                 vectors = self.embedder.embed(texts)
-                elapsed = max(time.time() - started, 1e-6)
+                elapsed = max(time.monotonic() - started, 1e-6)
                 assert vectors.shape == (len(texts), EMBEDDING_DIMENSION)
 
                 self.rate = 0.7 * self.rate + 0.3 * (len(texts) / elapsed)
